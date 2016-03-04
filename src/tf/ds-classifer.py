@@ -9,7 +9,8 @@ from random import shuffle
 #
 np.random.seed(10)
 
-in_file = 'data/data-min25.ints'
+# in_file = 'data/data-min25.ints'
+in_file = 'data/data-min25_2label.ints'
 pad_token = 2
 batch_size = 250
 word_dim = 50
@@ -81,9 +82,8 @@ train_y, dev_y = data_y[:-1000], data_y[-1000+1:]
 
 input_x = tf.placeholder(tf.int32, [None, seq_len], name="input_x")
 input_y = tf.placeholder(tf.float32, [None, label_size], name="input_y")
-
-sx, sy = tf.shape(input_x), tf.shape(input_y)
-input_x = tf.Print(input_x, [sx, sy])
+# sx, sy = tf.shape(input_x), tf.shape(input_y)
+# input_x = tf.Print(input_x, [sx, sy])
 
 lookup_table = tf.Variable(tf.random_uniform([vocab_size, word_dim], -1.0, 1.0))
 inputs = tf.nn.embedding_lookup(lookup_table, input_x)
@@ -102,6 +102,7 @@ softmax_w = tf.get_variable("softmax_w", [hidden_dim, label_size])
 softmax_b = tf.get_variable("softmax_b", [label_size])
 
 logits = tf.nn.xw_plus_b(state, softmax_w, softmax_b, name="logits")
+# training loss
 loss = tf.nn.softmax_cross_entropy_with_logits(logits, input_y)
 _cost = tf.reduce_sum(loss) / batch_size
 
@@ -113,6 +114,9 @@ optimizer = tf.train.AdamOptimizer(learning_rate)
 # grads_and_vars = optimizer.compute_gradients(loss)
 # _train_op = optimizer.apply_gradients(grads_and_vars)
 _train_op = optimizer.apply_gradients(zip(grads, tvars))
+
+# eval
+predictions = tf.argmax(logits, 1)
 
 
 #
@@ -141,6 +145,23 @@ class MinibatchIterator:
 
 with tf.Graph().as_default() and tf.Session() as session:
     tf.initialize_all_variables().run()
+
+    # evaluate
+    is_training = False
+    x_batch, y_batch = MinibatchIterator(dev_x, batch_size), MinibatchIterator(dev_y, batch_size)
+    accuracy = 0
+    count = 0.0
+    for step, (x, y) in enumerate(zip(x_batch, y_batch)):
+        if len(x) == batch_size and int(np.sum(y)) > 0:
+            # y_labels = [i for yy in y if yy == 1]
+            y_labels = np.array([i for yy in y for l, i in enumerate(yy) if l == 1])
+            p = session.run([predictions], feed_dict={input_x: x, input_y: y})
+            correct_predictions = np.sum(p[0] == y_labels)
+            accuracy += (correct_predictions / batch_size)
+            count += batch_size
+    print 'Accuracy : ' + str(accuracy / count)
+
+    # train iteration
     for i in range(max_max_epoch):
 
         lr_decay = lr_decay ** max(i - max_epoch, 0.0)
@@ -150,13 +171,16 @@ with tf.Graph().as_default() and tf.Session() as session:
         # train an iteration
         is_training = True
         for step, (x, y) in enumerate(zip(x_batch, y_batch)):
-            if len(x) == batch_size and int(np.sum(y)) > 0:
+            if len(x) != batch_size:
+                print 'batchsize mismatch'
+            elif int(np.sum(y)) == 0:
+                print 'no label!', np.sum(x), np.sum(y)
+            else:
                 cost, _ = session.run([_cost, _train_op], feed_dict={input_x: x, input_y: y})
                 costs.append(cost)
                 sys.stdout.write('\r{:4.3f} last cost, {:4.3f} avg cost, {:1.0f} step'.format(cost, reduce(lambda x, y: x + y, costs) / len(costs), step))
                 sys.stdout.flush()
-            else:
-                print('no label!', np.sum(x), np.sum(y))
-        print '\n' + str(reduce(lambda x, y: x + y, costs) / len(costs))
 
-        # evaluate
+
+
+
