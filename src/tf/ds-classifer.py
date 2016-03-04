@@ -10,7 +10,7 @@ from random import shuffle
 np.random.seed(10)
 
 # in_file = 'data/data-min25.ints'
-in_file = 'data/data-min25_2label.ints'
+in_file = 'data/data-min25.ints'
 pad_token = 2
 batch_size = 250
 word_dim = 50
@@ -116,8 +116,8 @@ optimizer = tf.train.AdamOptimizer(learning_rate)
 _train_op = optimizer.apply_gradients(zip(grads, tvars))
 
 # eval
-predictions = tf.argmax(logits, 1)
-
+correct_prediction = tf.equal(tf.argmax(logits, 1), tf.argmax(input_y, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
 #
 #           Train
@@ -146,33 +146,24 @@ class MinibatchIterator:
 with tf.Graph().as_default() and tf.Session() as session:
     tf.initialize_all_variables().run()
 
-    # evaluate
-    is_training = False
-    x_batch, y_batch = MinibatchIterator(dev_x, batch_size), MinibatchIterator(dev_y, batch_size)
-    accuracy = 0
-    count = 0.0
-    for step, (x, y) in enumerate(zip(x_batch, y_batch)):
-        if len(x) == batch_size and int(np.sum(y)) > 0:
-            # y_labels = [i for yy in y if yy == 1]
-            y_labels = np.array([i for yy in y for l, i in enumerate(yy) if l == 1])
-            p = session.run([predictions], feed_dict={input_x: x, input_y: y})
-            correct_predictions = np.sum(p[0] == y_labels)
-            accuracy += (correct_predictions / batch_size)
-            count += batch_size
-    print 'Accuracy : ' + str(accuracy / count)
-
-    # train iteration
     for i in range(max_max_epoch):
+        print 'Evaluating'
+        is_training = False
+        x_batch, y_batch = MinibatchIterator(dev_x, batch_size), MinibatchIterator(dev_y, batch_size)
+        accuracies = []
+        for step, (x, y) in enumerate(zip(x_batch, y_batch)):
+            if len(x) == batch_size and int(np.sum(y)) > 0:
+                accuracies += session.run([accuracy], feed_dict={input_x: x, input_y: y})
+        print 'Accuracy : ' + str(reduce(lambda x, y: x + y, accuracies) / len(accuracies))
 
+        print 'Training'
         lr_decay = lr_decay ** max(i - max_epoch, 0.0)
         x_batch, y_batch = MinibatchIterator(data_x, batch_size), MinibatchIterator(data_y, batch_size)
         costs = []
-
-        # train an iteration
         is_training = True
         for step, (x, y) in enumerate(zip(x_batch, y_batch)):
             if len(x) != batch_size:
-                print 'batchsize mismatch'
+                print '\nbatchsize mismatch'
             elif int(np.sum(y)) == 0:
                 print 'no label!', np.sum(x), np.sum(y)
             else:
