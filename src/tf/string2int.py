@@ -33,7 +33,7 @@ def process_line(ent_map, ep_map, line, rel_map, label_map, token_counter):
 
     # normalize digits except in $ARG wildcard tokens
     if replace_digits:
-        rel_str = re.sub(r'(?<!\$ARG)[0-9]', '#', rel_str)
+        rel_str = re.sub(r'(?<!\$ARG)[0-9]', '0', rel_str)
     tokens = rel_str.split(' ')
 
     # split words into char tokens except leave $ARG as single tokens, flatten to list
