@@ -5,19 +5,21 @@ import numpy as np
 from collections import defaultdict
 import sys
 from random import shuffle
+import subprocess
 
 #
 #         Params
 #
 flags = tf.flags
-flags.DEFINE_string("in_file", 'data/merge_2012.tab_min25.ints', "input file")
+flags.DEFINE_string("in_file", 'data/merge_2013.tab_min25.ints', "input file")
 # tac related
-flags.DEFINE_string("int_file", 'data/candidates/candidates_2012.ints', "int mapped input file")
+flags.DEFINE_string("int_file", 'data/candidates/candidates_2012.wc.ints', "int mapped input file")
 flags.DEFINE_string("candidate_file", 'data/candidates/candidates_2012', "original candidate file")
 flags.DEFINE_string("scored_file", 'tmp_out', "output for scored candidate file")
 
 flags.DEFINE_integer("gpuid", 0, "gpu id to use")
 flags.DEFINE_integer("seed", 0, "random seed")
+flags.DEFINE_integer("dev_samples", 1000, "number of training instances to hold out to calculate dev accuracy")
 flags.DEFINE_integer("pad_token", 2, "int mapping for pad token")
 flags.DEFINE_integer("batch_size", 1000, "max mini batch size")
 flags.DEFINE_integer("word_dim", 50, "dimension for word embeddings")
@@ -25,7 +27,8 @@ flags.DEFINE_integer("hidden_dim", 100, "dimension for hidden state")
 flags.DEFINE_integer("max_grad_norm", 100, "maximum gradient norm")
 flags.DEFINE_integer("num_layers", 1, "number of layers for network")
 flags.DEFINE_integer("max_epoch", 25, "number of epochs to run for")
-flags.DEFINE_integer("seq_len", 20, "max length of token sequences")
+flags.DEFINE_integer("tac_eval_freq", 5, "run tac evaluation every kth iteration")
+flags.DEFINE_integer("seq_len", 50, "max length of token sequences")
 flags.DEFINE_boolean("bi", False, "Use bi-directional lstm")
 flags.DEFINE_float("lr", .1, "initial learning rate")
 flags.DEFINE_float("lr_decay", .2, "learning rate decay")
@@ -42,15 +45,16 @@ is_training = True
 #
 def read_int_file(int_file):
     ep_pat_map, pat_token_map = defaultdict(list), defaultdict(list)
-    l_size, v_size = 0, 0
+    l_size, v_size, line_count, too_long = 0, 0, 0, 0
     x, y = [], []
     with open(int_file) as f:
         for line in f:
+            line_count += 1
             e1, e2, ep, pattern, tokens, label = line.strip().split('\t')
             ep_pat_map[ep].append(pattern)
             label = int(label) - 1
             l_size = max(l_size, label + 1)
-            token_list = map(int, tokens.split(' '))
+            token_list = map(int, tokens.strip().split(' '))
             if len(token_list) <= FLAGS.seq_len:
                 if len(token_list) < FLAGS.seq_len:
                     token_list += [FLAGS.pad_token] * (FLAGS.seq_len - len(token_list))
@@ -58,6 +62,9 @@ def read_int_file(int_file):
                 v_size = max(v_size, max(token_list) + 1)
                 x.append(token_list)
                 y.append(label)
+            else:
+                too_long += 1
+    print 'Read in ' + str(line_count) + ' lines. ' + str(too_long) + ' lines were greater than max seq length.'
     return x, y, ep_pat_map, pat_token_map, l_size, v_size
 
 data_x, data_y, ep_pattern_map, pattern_token_map, label_size, vocab_size = read_int_file(FLAGS.in_file)
@@ -72,21 +79,20 @@ print(str(len(data_x)) + ' examples\t'
 def shuffle_data(x_dat, y_dat):
     zipped_data = zip(x_dat, y_dat)
     shuffle(zipped_data)
-    x_dat, y_dat = zip(*zipped_data)
-    return x_dat, y_dat
+    return zip(*zipped_data)
 
 
 data_x, data_y = shuffle_data(data_x, data_y)
 
 # convert data to numpy arrays - labels must be dense one-hot vectors
 dense_y = []
-for i, j in enumerate(data_y):
+for epoch, j in enumerate(data_y):
     dense_y.append([0] * label_size)
-    dense_y[i][j] = 1
+    dense_y[epoch][j] = 1
 data_y = np.array(dense_y)
 data_x = np.array(data_x)
-train_x, dev_x = data_x[:-1000], data_x[-1000:]
-train_y, dev_y = data_y[:-1000], data_y[-1000:]
+train_x, dev_x = data_x[:-FLAGS.dev_samples], data_x[-FLAGS.dev_samples:]
+train_y, dev_y = data_y[:-FLAGS.dev_samples], data_y[-FLAGS.dev_samples:]
 
 #
 #       Model stuff
@@ -173,41 +179,51 @@ def score_tac():
 
     # read in original candidate file that we will attach the scores to
     with open(FLAGS.candidate_file) as f:
-        for line in f:
-            out_line = line.rsplit('\t', 1)[0]
-            out_lines.append(out_line)
+        out_lines = ['\t'.join([out_prefix, s1, e1, s2, e2])
+                     for out_prefix, s1, e1, s2, e2, pattern in [line.strip().rsplit('\t', 5) for line in f]
+                     # don't consider the length of the entities when computing sequence length
+                     if len(pattern.split(' ')) - (int(e1)-int(s1)-1) - (int(e2)-int(s2)-1) <= FLAGS.seq_len]
 
     # score each line and attach the score to original file
+    offset = 0
     for x, y in zip(BatchIter(tac_x, FLAGS.batch_size), BatchIter(dense_tac_y, FLAGS.batch_size)):
-        cur_size = len(x)
-        # if cur_size == FLAGS.batch_size:
         label_scores = session.run(logits, feed_dict={input_x: x, input_y: y, batch_size:len(x)})
-        scores.extend([l[tac_y[1]] for i, l in enumerate(label_scores)])
-        # else:
-        #     scores.extend([0]*cur_size)
-    scored_lines = zip(scores, out_lines)
+        # take the score of the query label
+        scores.extend([l[tac_y[i+offset]] for i, l in enumerate(label_scores)])
+        offset += len(x)
 
-    for out_line in scored_lines:
-        print(out_line)
+    min_score, max_score = min(scores), max(scores)
+    delta = max_score - min_score
+    scores = [(s-min_score)/delta for s in scores]
+
+    with open(FLAGS.scored_file, 'w') as f:
+        for score, out_line in zip(scores, out_lines):
+            f.write(out_line + '\t' + str(score) + '\n')
 
 with tf.Graph().as_default() and tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as session:
     tf.initialize_all_variables().run()
 
-    for i in range(FLAGS.max_epoch):
+    for epoch in range(1, FLAGS.max_epoch):
         is_training = False
-        accuracies = []
-        for step, (x, y) in enumerate(zip(BatchIter(dev_x, FLAGS.batch_size), BatchIter(dev_y, FLAGS.batch_size))):
-            accuracies += session.run([accuracy], feed_dict={input_x: x, input_y: y, batch_size:len(x)})
-        print '\nAccuracy : ' + str(reduce(lambda a, b: a+b, accuracies) / len(accuracies))
+        if FLAGS.dev_samples > 0:
+            accuracies = [session.run(accuracy, feed_dict={input_x: x, input_y: y, batch_size: len(x)})
+                          for x, y in zip(BatchIter(dev_x, FLAGS.batch_size), BatchIter(dev_y, FLAGS.batch_size))]
+            print '\nAccuracy : ' + str(reduce(lambda a, b: a+b, accuracies) / len(accuracies))
 
-        score_tac()
+        if epoch % FLAGS.tac_eval_freq == 0:
+            print('\nScoring tac candidate file :' + FLAGS.candidate_file)
+            score_tac()
 
-        print 'Training'
-        FLAGS.lr_decay = FLAGS.lr_decay ** max(i - FLAGS.max_epoch, 0.0)
+        print 'Training - epoch : ' + str(epoch)
+        FLAGS.lr_decay = FLAGS.lr_decay ** max(epoch - FLAGS.max_epoch, 0.0)
         # train_x, train_y = shuffle_data(train_x, train_y)
         costs = []
         start_time = time.time()
         is_training = True
+        # shuffle training data
+        p = np.random.permutation(len(train_x))
+        train_x, train_y = train_x[p], train_y[p]
+
         for step, (x, y) in enumerate(zip(BatchIter(train_x, FLAGS.batch_size), BatchIter(train_y, FLAGS.batch_size))):
             if int(np.sum(y)) == 0:
                 print 'no label!', np.sum(x), np.sum(y)
