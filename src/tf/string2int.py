@@ -1,6 +1,7 @@
 __author__ = 'pat'
 
 import re
+import os
 import sys
 import getopt
 import pickle
@@ -12,7 +13,21 @@ from collections import defaultdict
 # use -v to export string-int maps
 ###
 
-def process_line(chars, ent_map, ep_map, line, rel_map, label_map, token_counter, double_vocab, replace_digits):
+
+in_file = ''
+out_file = ''
+save_vocab_dir = ''
+load_vocab_file = ''
+chars = False
+min_count = 0
+max_seq = sys.maxint
+double_vocab = False
+reset_tokens = False
+replace_digits = False
+merge_maps = False
+
+
+def process_line(ent_map, ep_map, line, rel_map, label_map, token_counter):
     e1_str, label, e2_str, doc_id, s1, e1, s2, e2, rel_str = line.strip().split('\t')
     ep_str = e1_str + '\t' + e2_str
 
@@ -36,8 +51,9 @@ def process_line(chars, ent_map, ep_map, line, rel_map, label_map, token_counter
             and tokens.index("$ARG1") > tokens.index("$ARG2"):
         tokens = [token + '_ARG2' for token in tokens]
 
-    for token in tokens:
-        token_counter[token] += 1
+    if load_vocab_file == '':
+        for token in tokens:
+            token_counter[token] += 1
 
     # if not chars:
     rel_str = ' '.join(tokens)
@@ -70,18 +86,7 @@ def export_map(file_name, vocab_map):
 
 
 def main(argv):
-    in_file = ''
-    out_file = ''
-    save_vocab_file = ''
-    load_vocab_file = ''
-    chars = False
-    min_count = 0
-    max_seq = sys.maxint
-    double_vocab = False
-    reset_tokens = False
-    replace_digits = False
-    merge_maps = False
-
+    global load_vocab_file, reset_tokens, in_file, out_file, chars, double_vocab, merge_maps, min_count, max_seq, save_vocab_dir, replace_digits
     help_msg = 'test.py -i <inFile> -o <outputfile> -m <throw away tokens seen less than this many times> \
 -s <throw away relations longer than this> -c <use char tokens (default is use words)> -d <double vocab depending on if [A1 rel A2] or [A2 rel A1]>'
     try:
@@ -106,7 +111,7 @@ def main(argv):
         elif opt in ("-c", "--chars"):
             chars = True
         elif opt in ("-v", "--saveVocab"):
-            save_vocab_file = arg
+            save_vocab_dir = arg
         elif opt in ("-l", "--loadVocab"):
             load_vocab_file = arg
         elif opt in ("-d", "--doubleVocab"):
@@ -146,7 +151,7 @@ def main(argv):
 
     # memory map all the data and return processed lines
     print 'Processing lines and getting token counts'
-    data = [process_line(chars, ent_map, ep_map, line, rel_map, label_map, token_counter, double_vocab, replace_digits)
+    data = [process_line(ent_map, ep_map, line, rel_map, label_map, token_counter)
             for line in open(in_file, 'r')]
 
     # prune infrequent tokens - sets unkidx to 1
@@ -166,15 +171,17 @@ def main(argv):
     print 'Num ents: ', len(ent_map), 'Num eps: ', len(ep_map), \
         'Num rels: ', len(rel_map), 'Num tokens: ', len(token_map), 'Num labels: ', len(label_map)
 
-    if save_vocab_file:
+    if save_vocab_dir:
         print 'Exporting vocab maps to file'
-        with open(save_vocab_file, 'wb') as fp:
-            pickle.dump([ent_map, ep_map, rel_map, token_map, token_counter], fp)
-        export_map(save_vocab_file + '-tokens.txt', token_map)
-        export_map(save_vocab_file + '-relations.txt', rel_map)
-        export_map(save_vocab_file + '-entities.txt', ent_map)
-        export_map(save_vocab_file + '-entpairs.txt', ep_map)
-        export_map(save_vocab_file + '-labels.txt', label_map)
+        if not os.path.exists(save_vocab_dir):
+            os.mkdir(save_vocab_dir)
+        with open(save_vocab_dir + '/vocab.pkl', 'wb') as fp:
+            pickle.dump([ent_map, ep_map, rel_map, label_map, token_map, token_counter], fp)
+        export_map(save_vocab_dir + '/tokens.txt', token_map)
+        export_map(save_vocab_dir + '/relations.txt', rel_map)
+        export_map(save_vocab_dir + '/entities.txt', ent_map)
+        export_map(save_vocab_dir + '/entpairs.txt', ep_map)
+        export_map(save_vocab_dir + '/labels.txt', label_map)
 
 
 if __name__ == "__main__":
