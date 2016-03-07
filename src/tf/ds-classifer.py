@@ -1,12 +1,12 @@
-import tensorflow as tf
-import time
-from tensorflow.models.rnn import rnn
-import numpy as np
 from collections import defaultdict
-import sys
 from random import shuffle
-import subprocess
-import os
+
+import sys
+import time
+
+from models import *
+from util import *
+
 #
 #         Params
 #
@@ -45,6 +45,7 @@ gpu_mem_fraction = .33
 #          Data
 #
 def read_int_file(int_file):
+    print 'Loading data from : ' + int_file
     ep_pat_map = defaultdict(list)
     l_size, v_size, line_count, too_long = 0, 0, 0, 0
     x, y = [], []
@@ -83,135 +84,36 @@ dense_y = []
 for epoch, j in enumerate(data_y):
     dense_y.append([0] * label_size)
     dense_y[epoch][j] = 1
-data_y = np.array(dense_y)
-data_x = np.array(data_x)
+data_x, data_y = np.array(data_x), np.array(dense_y)
 train_x, dev_x = data_x[:-FLAGS.dev_samples], data_x[-FLAGS.dev_samples:]
 train_y, dev_y = data_y[:-FLAGS.dev_samples], data_y[-FLAGS.dev_samples:]
 
-#
-#       Model stuff
-#
-with tf.device('/gpu:'+str(FLAGS.gpuid)):
-    batch_size = tf.placeholder(tf.float32)
-    input_x = tf.placeholder(tf.int32, [None, FLAGS.seq_len], name="input_x")
-    input_y = tf.placeholder(tf.float32, [None, label_size], name="input_y")
-
-    with tf.device('/cpu:0'):
-        lookup_table = tf.Variable(tf.random_uniform([vocab_size, FLAGS.word_dim], -1.0, 1.0))
-        inputs = tf.nn.embedding_lookup(lookup_table, input_x)
-    inputs = tf.nn.dropout(inputs, 1 - FLAGS.dropout)
-    inputs = [tf.squeeze(input_, [1]) for input_ in tf.split(1, FLAGS.seq_len, inputs)]
-
-    lstm_cell = tf.nn.rnn_cell.LSTMCell(num_units=FLAGS.hidden_dim, input_size=FLAGS.word_dim)
-    if is_training and 1 - FLAGS.dropout < 1:
-        lstm_cell = tf.nn.rnn_cell.DropoutWrapper(lstm_cell, output_keep_prob=1 - FLAGS.dropout)
-    cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * FLAGS.num_layers)
-    if FLAGS.bi:
-        back_cell = tf.nn.rnn_cell.LSTMCell(num_units=FLAGS.hidden_dim, input_size=FLAGS.word_dim)
-        if is_training and 1 - FLAGS.dropout < 1:
-            back_cell = tf.nn.rnn_cell.DropoutWrapper(lstm_cell, output_keep_prob=1 - FLAGS.dropout)
-        back_cell = tf.nn.rnn_cell.MultiRNNCell([back_cell] * FLAGS.num_layers)
-        outputs = rnn.bidirectional_rnn(cell, back_cell, inputs, dtype=tf.float32)
-        state = outputs[-1] + outputs[len(outputs)/2]
-    else:
-        outputs, state = rnn.rnn(cell, inputs, dtype=tf.float32)
-
-    # lstm returns [hiddenstate+cell] -- extact just the hidden state
-    state = tf.slice(state, [0, 0], tf.cast(tf.pack([batch_size, FLAGS.hidden_dim]), tf.int32))
-    softmax_w = tf.get_variable("softmax_w", [FLAGS.hidden_dim, label_size])
-    softmax_b = tf.get_variable("softmax_b", [label_size])
-
-    logits = tf.nn.xw_plus_b(state, softmax_w, softmax_b, name="logits")
-    # training loss
-    loss = tf.nn.softmax_cross_entropy_with_logits(logits, input_y)
-    _cost = tf.reduce_sum(loss) / batch_size
-
-    tvars = tf.trainable_variables()
-    grads, _ = tf.clip_by_global_norm(tf.gradients(_cost, tvars, aggregation_method=2), FLAGS.max_grad_norm)
-    optimizer = tf.train.AdamOptimizer(FLAGS.lr)
-    _train_op = optimizer.apply_gradients(zip(grads, tvars))
-
-    # eval
-    correct_prediction = tf.equal(tf.argmax(logits, 1), tf.argmax(input_y, 1))
-    accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
 
 #
 #           Train
 #
-class BatchIter:
-    def __init__(self, data_array, size):
-        self.data_array = data_array
-        self.num_rows = data_array.shape[0]
-        self.batch_size = size
-        self.start_idx = 0
-
-    def __iter__(self):
-        self.start_idx = 0
-        return self
-
-    def next(self):
-        if self.start_idx >= self.num_rows:
-            raise StopIteration
-        else:
-            end_idx = min(self.start_idx + self.batch_size, self.num_rows)
-            to_return = self.data_array[self.start_idx:end_idx]
-            self.start_idx = end_idx
-            return to_return
 
 
-# score tac candidate file
-def score_tac(_epoch):
-    tac_x, tac_y, tac_ep_pattern_map, _, _ = read_int_file(FLAGS.int_file)
-    dense_tac_y = []
-    for i, j in enumerate(tac_y):
-        dense_tac_y.append([0] * label_size)
-        dense_tac_y[i][j] = 1
-    tac_x, dense_tac_y = np.array(tac_x), np.array(dense_tac_y)
-    out_lines, scores = [], []
 
-    # read in original candidate file that we will attach the scores to
-    with open(FLAGS.candidate_file) as f:
-        out_lines = ['\t'.join([out_prefix, s1, e1, s2, e2])
-                     for out_prefix, s1, e1, s2, e2, pattern in [line.strip().rsplit('\t', 5) for line in f]
-                     # don't consider the length of the entities when computing sequence length
-                     if len(pattern.split(' ')) - (int(e1)-int(s1)-1) - (int(e2)-int(s2)-1) <= FLAGS.seq_len]
-
-    # score each line and attach the score to original file
-    offset = 0
-    for x, y in zip(BatchIter(tac_x, FLAGS.batch_size), BatchIter(dense_tac_y, FLAGS.batch_size)):
-        label_scores = session.run(logits, feed_dict={input_x: x, input_y: y, batch_size:len(x)})
-        # take the score of the query label
-        scores.extend([l[tac_y[i+offset]] for i, l in enumerate(label_scores)])
-        offset += len(x)
-
-    min_score, max_score = min(scores), max(scores)
-    delta = max_score - min_score
-    scores = [(s-min_score)/delta for s in scores]
-
-    scored_candidate = FLAGS.result_dir+'/scored_'+str(epoch)
-    if not os.path.exists(FLAGS.result_dir):
-        os.makedirs(FLAGS.result_dir)
-    with open(scored_candidate, 'w') as f:
-        for score, out_line in zip(scores, out_lines):
-            f.write(out_line + '\t' + str(score) + '\n')
-        subprocess.Popen('bin/tac-evaluation/tune-thresh.sh 2012 ' + scored_candidate + ' ' + FLAGS.result_dir + '/tuned_' + str(_epoch) + ' &', shell=True)
+model = DSModel(FLAGS, label_size, vocab_size)
 
 with tf.Graph().as_default() and tf.Session(
-        config=tf.ConfigProto(allow_soft_placement=True,
-                              gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=gpu_mem_fraction))) as session:
+        config=tf.ConfigProto(intra_op_parallelism_threads=1, allow_soft_placement=True,
+                              gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=gpu_mem_fraction))
+) as session:
     tf.initialize_all_variables().run()
 
     for epoch in range(1, FLAGS.max_epoch):
-        is_training = False
         if FLAGS.dev_samples > 0:
-            accuracies = [session.run(accuracy, feed_dict={input_x: x, input_y: y, batch_size: len(x)})
-                          for x, y in zip(BatchIter(dev_x, FLAGS.batch_size), BatchIter(dev_y, FLAGS.batch_size))]
+            accuracies = [model.accuracy(session, x, y) for x, y
+                          in zip(BatchIter(dev_x, FLAGS.batch_size), BatchIter(dev_y, FLAGS.batch_size))]
             print '\nAccuracy : ' + str(reduce(lambda a, b: a+b, accuracies) / len(accuracies))
 
         if epoch % FLAGS.tac_eval_freq == 0:
             print('\nScoring tac candidate file :' + FLAGS.candidate_file)
-            score_tac(epoch)
+            tac_x, tac_y, tac_ep_pattern_map, _, _ = read_int_file(FLAGS.int_file)
+            model.score_tac(session, tac_x, tac_y, epoch, FLAGS)
 
         print 'Training - epoch : ' + str(epoch)
         FLAGS.lr_decay = FLAGS.lr_decay ** max(epoch - FLAGS.max_epoch, 0.0)
@@ -219,7 +121,6 @@ with tf.Graph().as_default() and tf.Session(
         costs = []
         total_cost = 0
         start_time = time.time()
-        is_training = True
         # shuffle training data
         p = np.random.permutation(len(train_x))
         train_x, train_y = train_x[p], train_y[p]
@@ -229,7 +130,7 @@ with tf.Graph().as_default() and tf.Session(
                 print 'no label!', np.sum(x), np.sum(y)
             else:
                 # print len(x)
-                cost, _ = session.run([_cost, _train_op], feed_dict={input_x: x, input_y: y, batch_size: len(x)})
+                cost = model.step(session, x, y)
                 costs.append(cost)
                 total_cost += cost
                 exp_per_sec = FLAGS.batch_size * ((time.time() - start_time) * 1000 / (step + 1))
