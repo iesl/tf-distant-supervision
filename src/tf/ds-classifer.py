@@ -75,8 +75,8 @@ def read_int_file(int_file):
 
 data_x_seq, data_x_ep, data_y, ep_pattern_map, label_size, vocab_size = read_int_file(FLAGS.in_file)
 
-print(str(len(data_x_seq)) + ' examples\t' + str(len(ep_pattern_map)) + ' entity pairs\t'
-       + str(label_size) + ' labels\t' + str(vocab_size) + ' unique tokens')
+print(str(len(data_x_seq)) + ' examples\t' + str(len(ep_pattern_map)) + ' entity pairs\t' +
+      str(label_size) + ' labels\t' + str(vocab_size) + ' unique tokens')
 
 
 

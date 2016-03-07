@@ -91,7 +91,8 @@ class DSModel:
         # score each line and attach the score to original file
         offset = 0
         for x, y in zip(BatchIter(tac_x, FLAGS.batch_size), BatchIter(dense_tac_y, FLAGS.batch_size)):
-            label_scores = session.run(self._logits, feed_dict={self.input_x: x, self.input_y: y, self.batch_size:len(x), self.is_training: False})
+            label_scores = session.run(self._logits, feed_dict={self.state: self.calc_state(session, x, False), self.input_y: y,
+                                                                self.batch_size: len(x), self.is_training: False})
             # take the score of the query label
             scores.extend([l[tac_y[i+offset]] for i, l in enumerate(label_scores)])
             offset += len(x)
@@ -106,8 +107,8 @@ class DSModel:
         with open(scored_candidate, 'w') as f:
             for score, out_line in zip(scores, out_lines):
                 f.write(out_line + '\t' + str(score) + '\n')
-            subprocess.Popen('bin/tac-evaluation/tune-thresh.sh 2012 ' + scored_candidate + ' ' + FLAGS.result_dir + '/tuned_' + str(epoch) + ' &', shell=True)
-
+            subprocess.Popen('bin/tac-evaluation/tune-thresh.sh 2012 ' + scored_candidate + ' ' + FLAGS.result_dir +
+                             '/tuned_' + str(epoch) + ' &', shell=True)
 
     def set_up_data(self, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
         zipped_data = zip(data_x_seq, data_y)
@@ -133,18 +134,20 @@ class PooledDSModel(DSModel):
         train_x, train_y, dev_x, dev_y = DSModel.set_up_data(self, data_x, data_x_ep, data_y, ep_pattern_map, FLAGS)
         return train_x, train_y, dev_x, dev_y
 
+    ''' x is a list of lists of pattern sequences id's, y is corresponding target labels
+    '''
     def step(self, session, x, y):
-        flat_x = [xx for sublist in x for xx in sublist]
+        # flatten x so that we can encode all patterns at the same time using lstm
+        flat_x = [pattern for pattern_list in x for pattern in pattern_list]
         state = self.calc_state(session, flat_x, True)
-        print(len(state), state[0])
-
+        # unflatten the encoded patterns and group in their original lists
         start = 0
-        unflat_x = [] # [x[start:length] for (length in lengths)]
+        unflat_x = []
         for l in [len(_x) for _x in x]:
             unflat_x.append(state[start:start+l])
             start += l
-        mean = [np.mean(encoded_patterns) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x]
-        print(flat_x[0], len(x), len(flat_x), len(unflat_x), len(mean), mean[0])
+
+        mean = np.vstack([np.mean(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
 
         cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: mean, self.input_y: y, self.batch_size: len(x), self.is_training: True})
         return cost
