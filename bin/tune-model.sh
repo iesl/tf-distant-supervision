@@ -52,7 +52,7 @@ do
                                 --batch_size $batchsize \
                                 --dropout $dropout \
                                 --max_grad_norm $clipgrad \
-                                --result_dir $RUN_NAME\
+                                --result_dir $OUT_LOG/$RUN_NAME \
                                 --gpuid 0 \
                                 --max_epoch $MAX_EPOCHS \
                                 --tac_eval_freq $EVAL_FREQ \
