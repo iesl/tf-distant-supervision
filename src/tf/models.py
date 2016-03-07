@@ -4,6 +4,7 @@ from util import *
 import os
 import subprocess
 import numpy as np
+from random import shuffle
 
 
 class DSModel:
@@ -16,6 +17,8 @@ class DSModel:
             self.batch_size = tf.placeholder(tf.float32)
             self.input_x = tf.placeholder(tf.int32, [None, FLAGS.seq_len], name="input_x")
             self.input_y = tf.placeholder(tf.float32, [None, label_size], name="input_y")
+            self.state = tf.placeholder(tf.float32)
+
 
             with tf.device('/cpu:0'):
                 lookup_table = tf.Variable(tf.random_uniform([vocab_size, FLAGS.word_dim], -1.0, 1.0))
@@ -38,11 +41,11 @@ class DSModel:
                 outputs, state = rnn.rnn(cell, inputs, dtype=tf.float32)
 
             # lstm returns [hiddenstate+cell] -- extact just the hidden state
-            state = tf.slice(state, [0, 0], tf.cast(tf.pack([self.batch_size, FLAGS.hidden_dim]), tf.int32))
+            self._state = tf.slice(state, [0, 0], tf.cast(tf.pack([self.batch_size, FLAGS.hidden_dim]), tf.int32))
             softmax_w = tf.get_variable("softmax_w", [FLAGS.hidden_dim, label_size])
             softmax_b = tf.get_variable("softmax_b", [label_size])
 
-            self._logits = tf.nn.xw_plus_b(state, softmax_w, softmax_b, name="logits")
+            self._logits = tf.nn.xw_plus_b(self.state, softmax_w, softmax_b, name="logits")
             # training loss
             loss = tf.nn.softmax_cross_entropy_with_logits(self._logits, self.input_y)
             self._cost = tf.reduce_sum(loss) / self.batch_size
@@ -56,18 +59,20 @@ class DSModel:
             correct_prediction = tf.equal(tf.argmax(self._logits, 1), tf.argmax(self.input_y, 1))
             self._accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
+    def calc_state(self, session, x, is_training):
+        state = session.run(self._state, feed_dict={self.input_x: x, self.batch_size: len(x), self.is_training: is_training})
+        return state
+
     def step(self, session, x, y):
-        cost, _ = session.run([self._cost, self._train_op], feed_dict={self.input_x: x, self.input_y: y, self.batch_size: len(x), self.is_training: True})
+        cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: self.calc_state(session, x, True), self.input_y: y, self.batch_size: len(x), self.is_training: True})
         return cost
 
     def accuracy(self, session, x, y):
-        acc = session.run(self._accuracy, feed_dict={self.input_x: x, self.input_y: y, self.batch_size: len(x), self.is_training: False})
+        acc = session.run(self._accuracy, feed_dict={self.state: self.calc_state(session, x, False), self.input_y: y, self.batch_size: len(x), self.is_training: False})
         return acc
 
 
-
-
-        # score tac candidate file
+    # score tac candidate file
     def score_tac(self, session, tac_x, tac_y, epoch, FLAGS):
         dense_tac_y = []
         for i, j in enumerate(tac_y):
@@ -104,6 +109,42 @@ class DSModel:
             subprocess.Popen('bin/tac-evaluation/tune-thresh.sh 2012 ' + scored_candidate + ' ' + FLAGS.result_dir + '/tuned_' + str(epoch) + ' &', shell=True)
 
 
+    def set_up_data(self, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
+        zipped_data = zip(data_x_seq, data_y)
+        shuffle(zipped_data)
+        data_x, data_y = zip(*zipped_data)
 
-# class BiLSTM(DSModel):
+        # convert data to numpy arrays - labels must be dense one-hot vectors
+        dense_y = []
+        for epoch, j in enumerate(data_y):
+            dense_y.append([0] * self.label_size)
+            dense_y[epoch][j] = 1
+        data_x, data_y = np.array(data_x), np.array(dense_y)
+        train_x, dev_x = data_x[:-FLAGS.dev_samples], data_x[-FLAGS.dev_samples:]
+        train_y, dev_y = data_y[:-FLAGS.dev_samples], data_y[-FLAGS.dev_samples:]
 
+        return train_x, train_y, dev_x, dev_y
+
+
+class PooledDSModel(DSModel):
+
+    def set_up_data(self, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
+        data_x = [ep_pattern_map[ep] for ep in data_x_ep]
+        train_x, train_y, dev_x, dev_y = DSModel.set_up_data(self, data_x, data_x_ep, data_y, ep_pattern_map, FLAGS)
+        return train_x, train_y, dev_x, dev_y
+
+    def step(self, session, x, y):
+        flat_x = [xx for sublist in x for xx in sublist]
+        state = self.calc_state(session, flat_x, True)
+        print(len(state), state[0])
+
+        start = 0
+        unflat_x = [] # [x[start:length] for (length in lengths)]
+        for l in [len(_x) for _x in x]:
+            unflat_x.append(state[start:start+l])
+            start += l
+        mean = [np.mean(encoded_patterns) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x]
+        print(flat_x[0], len(x), len(flat_x), len(unflat_x), len(mean), mean[0])
+
+        cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: mean, self.input_y: y, self.batch_size: len(x), self.is_training: True})
+        return cost
