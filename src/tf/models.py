@@ -9,9 +9,28 @@ from random import shuffle
 
 class DSModel:
 
-    def __init__(self, FLAGS, label_size, vocab_size):
+    def __init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
+        self.ep_pattern_map = ep_pattern_map
         self.label_size = label_size
         self.vocab_size = vocab_size
+        self.FLAGS = FLAGS
+
+        # shuffle data
+        zipped_data = zip(data_x_seq, data_x_ep, data_y)
+        shuffle(zipped_data)
+        data_x_seq, data_x_ep, data_y = zip(*zipped_data)
+
+        # convert data to numpy arrays - labels must be dense one-hot vectors
+        dense_y = []
+        for epoch, j in enumerate(data_y):
+            dense_y.append([0] * label_size)
+            dense_y[epoch][j] = 1
+        data_x_seq, data_x_ep, data_y = np.array(data_x_seq), np.array(data_x_ep), np.array(dense_y)
+        self.train_x, self.dev_x = data_x_seq[:-FLAGS.dev_samples], data_x_seq[-FLAGS.dev_samples:]
+        self.train_x_ep, self.dev_x_ep = data_x_ep[:-FLAGS.dev_samples], data_x_ep[-FLAGS.dev_samples:]
+        self.train_y, self.dev_y = data_y[:-FLAGS.dev_samples], data_y[-FLAGS.dev_samples:]
+
+        # set up graph
         with tf.device('/gpu:'+str(FLAGS.gpuid)):
             self.is_training = tf.placeholder(tf.bool)
             self.batch_size = tf.placeholder(tf.float32)
@@ -110,33 +129,19 @@ class DSModel:
             subprocess.Popen('bin/tac-evaluation/tune-thresh.sh 2012 ' + scored_candidate + ' ' + FLAGS.result_dir +
                              '/tuned_' + str(epoch) + ' &', shell=True)
 
-    def set_up_data(self, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
-        zipped_data = zip(data_x_seq, data_y)
-        shuffle(zipped_data)
-        data_x, data_y = zip(*zipped_data)
-
-        # convert data to numpy arrays - labels must be dense one-hot vectors
-        dense_y = []
-        for epoch, j in enumerate(data_y):
-            dense_y.append([0] * self.label_size)
-            dense_y[epoch][j] = 1
-        data_x, data_y = np.array(data_x), np.array(dense_y)
-        train_x, dev_x = data_x[:-FLAGS.dev_samples], data_x[-FLAGS.dev_samples:]
-        train_y, dev_y = data_y[:-FLAGS.dev_samples], data_y[-FLAGS.dev_samples:]
-
-        return train_x, train_y, dev_x, dev_y
 
 
 class PooledDSModel(DSModel):
 
-    def set_up_data(self, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
-        data_x = [ep_pattern_map[ep] for ep in data_x_ep]
-        train_x, train_y, dev_x, dev_y = DSModel.set_up_data(self, data_x, data_x_ep, data_y, ep_pattern_map, FLAGS)
-        return train_x, train_y, dev_x, dev_y
+    def __init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
+        DSModel.__init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+        # self.train_x = [ep_pattern_map[ep] for ep in self.train_x_ep]
+        self.train_x = self.train_x_ep
 
-    ''' x is a list of lists of pattern sequences id's, y is corresponding target labels
-    '''
+
+    ''' x is a list of lists of pattern sequences id's, y is corresponding target labels  '''
     def step(self, session, x, y):
+        x = [self.ep_pattern_map[ep] for ep in x]
         # flatten x so that we can encode all patterns at the same time using lstm
         flat_x = [pattern for pattern_list in x for pattern in pattern_list]
         state = self.calc_state(session, flat_x, True)
@@ -147,7 +152,9 @@ class PooledDSModel(DSModel):
             unflat_x.append(state[start:start+l])
             start += l
 
-        mean = np.vstack([np.mean(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
+        # max pool or mean pool
+        pooled = np.vstack([np.amax(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x]) if self.FLAGS.max\
+            else np.vstack([np.mean(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
 
-        cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: mean, self.input_y: y, self.batch_size: len(x), self.is_training: True})
+        cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: pooled, self.input_y: y, self.batch_size: len(x), self.is_training: True})
         return cost

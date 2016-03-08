@@ -2,8 +2,8 @@
 
 #!/bin/sh
 
-export MAX_EPOCHS=6
-export EVAL_FREQ=3
+export MAX_EPOCHS=2
+export EVAL_FREQ=2
 
 OUT_LOG=results/hyperparams/
 mkdir -p $OUT_LOG
@@ -17,7 +17,7 @@ num_gpus=${#gpuids[@]}
 # grid search over these
 lrs="0.001 0.01 0.1"
 lr_decays="0.1 0.01"
-dropouts="0.1 0.25 0.5"
+dropouts="0.1"
 clipgrads="100" # 0.1 0.25"
 word_dims="10 25 50"
 hidden_dims="10 25 50"
@@ -43,7 +43,7 @@ do
                    do
                        for dropout in $dropouts;
                        do
-                           RUN_NAME=$word_dim-$hidden_dim-$lr-$decay-$dropout-$clipgrad-$batchsize
+                           RUN_NAME=maxpool-$word_dim-$hidden_dim-$lr-$decay-$dropout-$clipgrad-$batchsize
                            CMD="$RUN_CMD \
                                 --word_dim $word_dim \
                                 --hidden_dim $hidden_dim \
@@ -56,6 +56,8 @@ do
                                 --gpuid 0 \
                                 --max_epoch $MAX_EPOCHS \
                                 --tac_eval_freq $EVAL_FREQ \
+                                --pool \
+                                --max \
                                 &> $OUT_LOG/train-$RUN_NAME.log"
                            commands+=("$CMD")
                            echo "Adding job $RUN_NAME"

@@ -30,16 +30,18 @@ flags.DEFINE_integer("tac_eval_freq", 5, "run tac evaluation every kth iteration
 flags.DEFINE_integer("seq_len", 50, "max length of token sequences")
 flags.DEFINE_boolean("bi", True, "Use bi-directional lstm")
 flags.DEFINE_boolean("pool", False, "pool examples by ep when training")
+flags.DEFINE_boolean("max", False, "max pool instead of mean pool")
 flags.DEFINE_boolean("testing", False, "Take subset of data for fast testing")
 flags.DEFINE_float("lr", .01, "initial learning rate")
 flags.DEFINE_float("lr_decay", .01, "learning rate decay")
 flags.DEFINE_float("dropout", .1, "dropout probability")
+flags.DEFINE_float("memory", .33, "fraction of available memory to use")
 FLAGS = flags.FLAGS
 
 np.random.seed(FLAGS.seed)
 tf.set_random_seed(FLAGS.seed)
 is_training = True
-gpu_mem_fraction = .33
+gpu_mem_fraction = FLAGS.memory
 
 
 #
@@ -83,8 +85,7 @@ print(str(len(data_x_seq)) + ' examples\t' + str(len(ep_pattern_map)) + ' entity
 #
 #           Train
 #
-model = PooledDSModel(FLAGS, label_size, vocab_size) if FLAGS.pool else DSModel(FLAGS, label_size, vocab_size)
-train_x, train_y, dev_x, dev_y = model.set_up_data(data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+model = PooledDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS) if FLAGS.pool else DSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
 
 with tf.Graph().as_default() and tf.Session(
         config=tf.ConfigProto(intra_op_parallelism_threads=1, allow_soft_placement=True,
@@ -94,11 +95,6 @@ with tf.Graph().as_default() and tf.Session(
 
     for epoch in range(1, FLAGS.max_epoch):
 
-        if epoch % FLAGS.tac_eval_freq == 0:
-            print('\nScoring tac candidate file :' + FLAGS.candidate_file)
-            tac_x_seq, tac_x_ep, tac_y, tac_ep_pattern_map, _, _ = read_int_file(FLAGS.int_file)
-            model.score_tac(session, tac_x_seq, tac_y, epoch, FLAGS)
-
         print 'Training - epoch : ' + str(epoch)
         FLAGS.lr_decay = FLAGS.lr_decay ** max(epoch - FLAGS.max_epoch, 0.0)
         # train_x, train_y = shuffle_data(train_x, train_y)
@@ -106,10 +102,10 @@ with tf.Graph().as_default() and tf.Session(
         total_cost = 0
         start_time = time.time()
         # shuffle training data
-        p = np.random.permutation(len(train_x))
-        train_x, train_y = train_x[p], train_y[p]
+        p = np.random.permutation(len(model.train_y))
+        train_x, train_y = model.train_x[p], model.train_y[p]
 
-        for step, (x, y) in enumerate(zip(BatchIter(train_x, FLAGS.batch_size), BatchIter(train_y, FLAGS.batch_size))):
+        for step, (x, y) in enumerate(zip(BatchIter(model.train_x, FLAGS.batch_size), BatchIter(model.train_y, FLAGS.batch_size))):
             if int(np.sum(y)) == 0:
                 print 'no label!', np.sum(x), np.sum(y)
             else:
@@ -124,5 +120,10 @@ with tf.Graph().as_default() and tf.Session(
 
         if FLAGS.dev_samples > 0:
             accuracies = [model.accuracy(session, x, y) for x, y
-                          in zip(BatchIter(dev_x, FLAGS.batch_size), BatchIter(dev_y, FLAGS.batch_size))]
+                          in zip(BatchIter(model.dev_x, FLAGS.batch_size), BatchIter(model.dev_y, FLAGS.batch_size))]
             print '\nAccuracy : ' + str(reduce(lambda a, b: a+b, accuracies) / len(accuracies))
+
+        if epoch % FLAGS.tac_eval_freq == 0:
+            print('\nScoring tac candidate file :' + FLAGS.candidate_file)
+            tac_x_seq, tac_x_ep, tac_y, tac_ep_pattern_map, _, _ = read_int_file(FLAGS.int_file)
+            model.score_tac(session, tac_x_seq, tac_y, epoch, FLAGS)
