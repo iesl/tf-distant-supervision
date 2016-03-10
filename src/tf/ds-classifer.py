@@ -18,11 +18,11 @@ flags.DEFINE_string("result_dir", 'results/tmp', "output for scored candidate fi
 
 flags.DEFINE_integer("gpuid", 0, "gpu id to use")
 flags.DEFINE_integer("seed", 0, "random seed")
-flags.DEFINE_integer("dev_samples", 1024, "number of training instances to hold out to calculate dev accuracy")
+flags.DEFINE_integer("dev_samples", 256, "number of training instances to hold out to calculate dev accuracy")
 flags.DEFINE_integer("pad_token", 2, "int mapping for pad token")
 flags.DEFINE_integer("batch_size", 1000, "max mini batch size")
-flags.DEFINE_integer("word_dim", 25, "dimension for word embeddings")
-flags.DEFINE_integer("hidden_dim", 10, "dimension for hidden state")
+flags.DEFINE_integer("word_dim", 50, "dimension for word embeddings")
+flags.DEFINE_integer("hidden_dim", 25, "dimension for hidden state")
 flags.DEFINE_integer("max_grad_norm", 100, "maximum gradient norm")
 flags.DEFINE_integer("num_layers", 1, "number of layers for network")
 flags.DEFINE_integer("max_epoch", 25, "numbechange dr of epochs to run for")
@@ -31,9 +31,9 @@ flags.DEFINE_integer("seq_len", 50, "max length of token sequences")
 flags.DEFINE_boolean("bi", True, "Use bi-directional lstm")
 flags.DEFINE_boolean("model", '', "type of aggregation model to use: mean-pool, max-pool, max-relation. By default uses no pooling")
 flags.DEFINE_boolean("testing", False, "Take subset of data for fast testing")
-flags.DEFINE_float("lr", .01, "initial learning rate")
+flags.DEFINE_float("lr", .001, "initial learning rate")
 flags.DEFINE_float("lr_decay", .01, "learning rate decay")
-flags.DEFINE_float("dropout", .1, "dropout probability")
+flags.DEFINE_float("dropout", .25, "dropout probability")
 flags.DEFINE_float("memory", .95, "fraction of available memory to use")
 FLAGS = flags.FLAGS
 
@@ -85,14 +85,18 @@ tac_x_seq, tac_x_ep, tac_y, tac_ep_pattern_map, _, _ = read_int_file(FLAGS.int_f
 #
 #       Choose model
 #
-# if FLAGS.model == 'max-relation':
-#     model = MaxRelationDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
-# elif FLAGS.model == 'max-pool':
-#     model = MaxPooledDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
-# elif FLAGS.model == 'mean-pool':
-model = MeanPooledDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
-# else:
-#     model = DSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+if FLAGS.model == 'max-relation':
+    print 'max relation model'
+    model = MaxRelationDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+elif FLAGS.model == 'max-pool':
+    print 'max pool model'
+    model = MaxPooledDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+elif FLAGS.model == 'mean-pool':
+    print 'mean pool model'
+    model = MeanPooledDSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
+else:
+    print 'classifier model'
+    model = DSModel(label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
 
 #
 #           Train

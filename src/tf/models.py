@@ -179,8 +179,9 @@ class PooledDSModel(DSModel):
         start_time = time.time()
         # shuffle training data
         step = 0
+        i = 0
         for size, x_size in self.train_x.iteritems():
-            print(size/float(len(self.train_x)))
+            print('\n' + str(i/float(len(self.train_x))))
             y_size = self.train_y[size]
             for x, y in zip(PoolBatchIter(x_size, self.FLAGS.batch_size), PoolBatchIter(y_size, self.FLAGS.batch_size)):
                 if int(np.sum(y)) == 0:
@@ -196,6 +197,7 @@ class PooledDSModel(DSModel):
                                              (step / float(len(self.train_x_ep))), exp_per_sec))
                     sys.stdout.flush()
                 step += len(x)
+            i += 1
 
     ''' x is a list of lists of pattern sequences id's, y is corresponding target labels  '''
     def step(self, session, x, y):
