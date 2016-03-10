@@ -1,14 +1,18 @@
-import tensorflow as tf
-from tensorflow.models.rnn import rnn
-from util import *
 import os
 import subprocess
-import numpy as np
 from random import shuffle
+from collections import defaultdict
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.models.rnn import rnn
+
+from util import *
+import time
+import sys
 
 
 class DSModel:
-
     def __init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
         self.ep_pattern_map = ep_pattern_map
         self.label_size = label_size
@@ -90,6 +94,30 @@ class DSModel:
         acc = session.run(self._accuracy, feed_dict={self.state: self.calc_state(session, x, False), self.input_y: y, self.batch_size: len(x), self.is_training: False})
         return acc
 
+    def train_iteration(self, session, epoch):
+        print 'Training - epoch : ' + str(epoch)
+        self.FLAGS.lr_decay = self.FLAGS.lr_decay ** max(epoch - self.FLAGS.max_epoch, 0.0)
+        # train_x, train_y = shuffle_data(train_x, train_y)
+        costs = []
+        total_cost = 0
+        start_time = time.time()
+        # shuffle training data
+        p = np.random.permutation(len(self.train_y))
+        self.train_x, self.train_y = self.train_x[p], self.train_y[p]
+        for step, (x, y) in enumerate(
+                zip(BatchIter(self.train_x, self.FLAGS.batch_size), BatchIter(self.train_y, self.FLAGS.batch_size))):
+            if int(np.sum(y)) == 0:
+                print 'no label!', np.sum(x), np.sum(y)
+            else:
+                # print len(x)
+                cost = self.step(session, x, y)
+                costs.append(cost)
+                total_cost += cost
+                exp_per_sec = self.FLAGS.batch_size * ((time.time() - start_time) * 1000 / (step + 1))
+                sys.stdout.write('\r{:4.3f} last err, {:4.3f} avg err, {:2.2f} % done, examples/sec {:0.3f}'
+                                 .format(cost, total_cost / len(costs),
+                                         (100 * step * self.FLAGS.batch_size / float(len(self.train_x))), exp_per_sec))
+                sys.stdout.flush()
 
     # score tac candidate file
     def score_tac(self, session, tac_x, tac_y, epoch, FLAGS):
@@ -130,31 +158,98 @@ class DSModel:
                              '/tuned_' + str(epoch) + ' &', shell=True)
 
 
-
 class PooledDSModel(DSModel):
 
     def __init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS):
         DSModel.__init__(self, label_size, vocab_size, data_x_seq, data_x_ep, data_y, ep_pattern_map, FLAGS)
-        # self.train_x = [ep_pattern_map[ep] for ep in self.train_x_ep]
-        self.train_x = self.train_x_ep
+        # seperate training data by ep-pattern counts
+        self.train_x = defaultdict(list)
+        train_y = defaultdict(list)
+        for i, ep_patterns in enumerate([ep_pattern_map[ep] for ep in self.train_x_ep]):
+            self.train_x[len(ep_patterns)].append(ep_patterns)
+            train_y[len(ep_patterns)].append(self.train_y[i])
+        self.train_y = train_y
 
+    def train_iteration(self, session, epoch):
+        print 'Training - epoch : ' + str(epoch)
+        print(len(self.train_x_ep))
+        self.FLAGS.lr_decay = self.FLAGS.lr_decay ** max(epoch - self.FLAGS.max_epoch, 0.0)
+        costs = []
+        total_cost = 0
+        start_time = time.time()
+        # shuffle training data
+        step = 0
+        for size, x_size in self.train_x.iteritems():
+            print(size/float(len(self.train_x)))
+            y_size = self.train_y[size]
+            for x, y in zip(PoolBatchIter(x_size, self.FLAGS.batch_size), PoolBatchIter(y_size, self.FLAGS.batch_size)):
+                if int(np.sum(y)) == 0:
+                    print 'no label!', np.sum(x), np.sum(y)
+                else:
+                    # print len(x)
+                    cost = self.step(session, x, y)
+                    costs.append(cost)
+                    total_cost += cost
+                    exp_per_sec = self.FLAGS.batch_size * ((time.time() - start_time) * 1000 / (step + 1))
+                    sys.stdout.write('\r{:4.3f} last err, {:4.3f} avg err, {:2.2f} % done, examples/sec {:0.3f}'
+                                     .format(cost, total_cost / len(costs),
+                                             (step / float(len(self.train_x_ep))), exp_per_sec))
+                    sys.stdout.flush()
+                step += len(x)
 
     ''' x is a list of lists of pattern sequences id's, y is corresponding target labels  '''
     def step(self, session, x, y):
-        x = [self.ep_pattern_map[ep] for ep in x]
+        y_idx = np.argmax(y, 1)
         # flatten x so that we can encode all patterns at the same time using lstm
         flat_x = [pattern for pattern_list in x for pattern in pattern_list]
         state = self.calc_state(session, flat_x, True)
-        # unflatten the encoded patterns and group in their original lists
-        start = 0
-        unflat_x = []
-        for l in [len(_x) for _x in x]:
-            unflat_x.append(state[start:start+l])
-            start += l
 
-        # max pool or mean pool
-        pooled = np.vstack([np.amax(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x]) if self.FLAGS.max\
-            else np.vstack([np.mean(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
+        pooled = self.aggregate_patterns(session, state, x, y_idx)
 
         cost, _ = session.run([self._cost, self._train_op], feed_dict={self.state: pooled, self.input_y: y, self.batch_size: len(x), self.is_training: True})
         return cost
+
+    def aggregate_patterns(self, session, state, x, y_idx):
+        pass
+
+
+class MaxRelationDSModel(PooledDSModel):
+    def aggregate_patterns(self, session, state, x, y_idx):
+        logits = session.run(self._logits, feed_dict={self.state: state, self.input_y: y, self.batch_size: len(x), self.is_training: False})
+        start = 0
+        unflat_x = []
+        unflat_logits = []
+        for l in [len(_x) for _x in x]:
+            unflat_x.append(state[start:start + l])
+            unflat_logits.append(logits[start:start + l])
+            start += l
+        pooled_logits = [[label_score[y_idx[i]] for label_score in label_scores] for i, label_scores in enumerate(unflat_logits)]
+        max_pattern = [np.argmax(pattern_scores, 0) for pattern_scores in pooled_logits]
+        pooled = np.vstack([encoded_patterns[max_pattern[i]] for i, encoded_patterns in enumerate(unflat_x)])
+        return pooled
+
+
+class MeanPooledDSModel(PooledDSModel):
+    def aggregate_patterns(self, session, state, x, y_idx):
+        start = 0
+        unflat_x = []
+        for l in [len(_x) for _x in x]:
+            unflat_x.append(state[start:start + l])
+            start += l
+
+        # max pool or mean pool
+        pooled = np.vstack([np.mean(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
+        return pooled
+
+
+class MaxPooledDSModel(PooledDSModel):
+    def aggregate_patterns(self, session, state, x, y_idx):
+        start = 0
+        unflat_x = []
+        for l in [len(_x) for _x in x]:
+            unflat_x.append(state[start:start + l])
+            start += l
+
+        # max pool
+        pooled = np.vstack([np.amax(encoded_patterns, 0) if len(encoded_patterns) > 1 else encoded_patterns for encoded_patterns in unflat_x])
+        return pooled
